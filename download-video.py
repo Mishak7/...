@@ -1,4 +1,4 @@
-"""Download one MP4 from the GPU container through a Jupyter proxy."""
+"""Download one MP4 or ZIP from the GPU container through a Jupyter proxy."""
 
 import argparse
 import secrets
@@ -11,12 +11,13 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("video", type=Path)
+    parser.add_argument("file", type=Path)
     parser.add_argument("--port", type=int, default=18763)
     args = parser.parse_args()
-    video = args.video.resolve()
-    if video.suffix.lower() != ".mp4" or not video.is_file():
-        parser.error(f"Expected an existing MP4 file: {video}")
+    path = args.file.resolve()
+    content_type = {".mp4": "video/mp4", ".zip": "application/zip"}.get(path.suffix.lower())
+    if content_type is None or not path.is_file():
+        parser.error(f"Expected an existing MP4 or ZIP file: {path}")
 
     token = secrets.token_urlsafe(24)
     downloaded = False
@@ -29,11 +30,11 @@ def main():
                 self.send_error(404)
                 return
 
-            with video.open("rb") as source:
+            with path.open("rb") as source:
                 self.send_response(200)
-                self.send_header("Content-Type", "video/mp4")
-                self.send_header("Content-Length", str(video.stat().st_size))
-                self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(video.name, safe='')}")
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(path.stat().st_size))
+                self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(path.name, safe='')}")
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 shutil.copyfileobj(source, self.wfile)
@@ -49,7 +50,7 @@ def main():
         deadline = time.monotonic() + 600
         while not downloaded and time.monotonic() < deadline:
             server.handle_request()
-    print("Video sent." if downloaded else "Download link expired.", flush=True)
+    print("File sent." if downloaded else "Download link expired.", flush=True)
 
 
 if __name__ == "__main__":
