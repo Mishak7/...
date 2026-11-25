@@ -1,0 +1,88 @@
+# Kandinsky S2V Lite на H100
+
+Этот прогон сравнивает скорость Kandinsky S2V Lite Distilled на 1, 2 и 4 H100. Во всех замерах используются одинаковые портрет, аудио, `seed=42` и FlashAttention 3. Один ролик длится 5 секунд (125 кадров при 25 кадрах/с).
+
+## 1. Проверить контейнер
+
+Открой **Terminal** в JupyterLab и выполни:
+
+```bash
+nvidia-smi
+df -h /tmp
+df -i /tmp
+```
+
+Скрипт рассчитан на H100 80 ГБ с драйвером NVIDIA серии 580 или новее. В нашей раскладке одна карта — GPU 4, две — GPU 4–5, четыре — GPU 4–7. Сверь, что эти карты выделены тебе. Если номера отличаются, перед первым запуском укажи свои индексы `nvidia-smi` в списках `gpu_ids` в `run-h100.sh`. Перед стартом скрипт проверяет занятость выбранных карт и передаёт CUDA их UUID. CPU, RAM и диск могут быть общими с соседними задачами.
+
+Под окружение, кеши и веса заложи около 50 ГБ свободного места в `/tmp`. При первом прогоне Lite скачивает около 25 ГБ весов. [Требования Kandinsky](https://github.com/kandinskylab/kandinsky-s2v#requirements)
+
+## 2. Установить окружение
+
+```bash
+mkdir -p /tmp/kandinsky-h100 &&
+cd /tmp/kandinsky-h100 &&
+curl -fsSL https://raw.githubusercontent.com/Mishak7/.../main/run-h100.sh -o run-h100.sh
+```
+
+Если `uv` ещё нет, команда ниже установит его в каталог прогона. Затем `install` создаст отдельное Python-окружение в `/tmp/kandinsky-h100/venv` и скачает зависимости.
+
+```bash
+if ! command -v uv >/dev/null 2>&1 && [ ! -x ./bin/uv ]; then
+  curl -fsSL https://astral.sh/uv/install.sh |
+    env UV_UNMANAGED_INSTALL="$PWD/bin" sh
+fi
+
+bash run-h100.sh install
+```
+
+Скрипт берёт Kandinsky S2V на ревизии `6d319f0`. PyAV обновляется до `18.1.1`, потому что версия `18.1.0` из исходного lock-файла была отозвана. Кеши Hugging Face, Triton и CUDA находятся рядом с окружением в `/tmp/kandinsky-h100`.
+
+## 3. Сделать первый ролик
+
+```bash
+cd /tmp/kandinsky-h100 && bash run-h100.sh smoke
+```
+
+Скрипт скачает `inputs/ivan.png` и `inputs/ref.wav` из этого репозитория, сверит их контрольные суммы и запустит 8 шагов на GPU 4. При первом запуске предупреждение про `HF_TOKEN` может появиться во время загрузки публичных весов. Готовность ролика подтверждает строка `Saved 125 frames`. Папка с `lite-1gpu.mp4` и `run.log` выводится в строке `Results`.
+
+## 4. Сравнить карты и число шагов
+
+После успешного первого ролика запусти матрицу замеров. Конфигурации идут по очереди, с паузой между ними.
+
+```bash
+cd /tmp/kandinsky-h100 &&
+for cards in 1 2 4; do
+  NCCL_DEBUG=WARN BENCHMARK_REPEATS=1 bash run-h100.sh bench "$cards" 4 6 8 16 || break
+  sleep 5
+done
+```
+
+Для каждой группы карт скрипт сначала прогревает модель, затем делает один замер на каждое число шагов. `bench` использует локальный кеш весов. Если он пуст, сначала заверши `smoke`.
+
+```bash
+grep -H 'steps: median' /tmp/kandinsky-h100/outputs/bench-*/run.log
+```
+
+Время в логе включает генерацию и сохранение 5-секундного MP4 после прогрева. Чтобы получить секунды генерации на секунду видео, раздели время на 5. Например, 8,61 с на ролик — это 1,72 с/с. При одном повторе `median` совпадает со временем единственного прогона.
+
+Короткий эксперимент на 1 и 2 шагах отдельно:
+
+```bash
+NCCL_DEBUG=WARN BENCHMARK_REPEATS=1 bash run-h100.sh bench 4 1 2
+```
+
+## 5. Скачать ролик
+
+Укажи путь к MP4 из строки `Results`. Для готового первого ролика можно взять файл автоматически:
+
+```bash
+cd /tmp/kandinsky-h100 &&
+curl -fsSL https://raw.githubusercontent.com/Mishak7/.../main/download-video.py -o download-video.py &&
+video=$(find "$PWD/outputs" -type f -name 'lite-1gpu.mp4' -print -quit) &&
+[ -n "$video" ] &&
+python3 download-video.py "$video"
+```
+
+В JupyterLab открой **Proxy Services → Add proxy**, укажи порт `18763` и имя `kandinsky-video`. Добавь напечатанное `?key=...` к URL этого прокси. После скачивания временный сервер завершится. Вместо MP4 ему можно передать один ZIP с несколькими роликами. [Инструкция Cloud.ru](https://cloud.ru/docs/notebooks/ug/topics/guides__proxy)
+
+Если прокси недоступен, скопируй MP4 или ZIP на доступный тебе том, который виден и в терминале, и в File Browser. Проверь свободные inode командой `df -i /путь/к/тому`. Сохрани результаты до пересоздания контейнера, поскольку они лежат в `/tmp`.
