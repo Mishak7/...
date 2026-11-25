@@ -24,6 +24,8 @@ export UV_PROJECT_ENVIRONMENT="$storage/venv"
 export UV_CACHE_DIR="$storage/uv-cache"
 export UV_PYTHON_INSTALL_DIR="$storage/python"
 export XDG_CACHE_HOME="$storage/cache"
+export TRITON_CACHE_DIR="$XDG_CACHE_HOME/triton"
+export CUDA_CACHE_PATH="$XDG_CACHE_HOME/cuda"
 export HF_HOME="$storage/hf"
 export HF_HUB_CACHE="$HF_HOME/hub"
 export HF_XET_CACHE="$HF_HOME/xet"
@@ -95,7 +97,7 @@ for gpu in "${gpu_ids[@]}"; do
     gpu_uuids+=("$uuid")
 done
 
-mkdir -p "$root/inputs"
+mkdir -p "$root/inputs" "$TRITON_CACHE_DIR" "$CUDA_CACHE_PATH"
 fetch_verified inputs/ivan.png d0950f3677c2ff62db554c9d7d1bce5efe73bdfd3eb9f2dacce0664641cf6ce2
 fetch_verified inputs/ref.wav e052569e65cbaf0f97de4d8574a216eb588f39ae469ea0c989cdf7d37af1677a
 if [[ $mode == bench ]]; then
