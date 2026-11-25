@@ -10,7 +10,7 @@ fail() {
 mode=${1:-}
 case "$mode" in
     install|smoke|bench) ;;
-    *) fail "Usage: bash run-h100.sh {install|smoke|bench}" ;;
+    *) fail "Usage: bash run-h100.sh install|smoke|bench [1|2|4] [steps ...]" ;;
 esac
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -76,9 +76,27 @@ fetch_verified() {
 }
 
 gpu_ids=(4)
+steps=(8 4)
+attention_engine=${ATTENTION_ENGINE:-flash_attention_3}
+repeats=${BENCHMARK_REPEATS:-2}
 if [[ $mode == bench ]]; then
-    gpu_ids=(4 5 6 7)
+    case "${2:-4}" in
+        1) gpu_ids=(4) ;;
+        2) gpu_ids=(4 5) ;;
+        4) gpu_ids=(4 5 6 7) ;;
+        *) fail "Lite benchmark accepts 1, 2, or 4 GPUs." ;;
+    esac
+    if (( $# > 2 )); then
+        steps=("${@:3}")
+    fi
+    for step in "${steps[@]}" "$repeats"; do
+        [[ $step =~ ^[1-9][0-9]*$ ]] || fail "Steps and repeats must be positive integers."
+    done
 fi
+case "$attention_engine" in
+    flash_attention_3|sdpa) ;;
+    *) fail "ATTENTION_ENGINE must be flash_attention_3 or sdpa." ;;
+esac
 
 gpu_uuids=()
 for gpu in "${gpu_ids[@]}"; do
@@ -106,23 +124,26 @@ fi
 
 export CUDA_VISIBLE_DEVICES
 CUDA_VISIBLE_DEVICES=$(IFS=,; printf '%s' "${gpu_uuids[*]}")
-"$python" - "${#gpu_ids[@]}" <<'PY'
+"$python" - "${#gpu_ids[@]}" "$attention_engine" <<'PY'
 import sys
 
 import torch
-from flash_attn_interface import flash_attn_func
+from kandinsky_s2v.core.components.attention import resolve_attention_engine
 
 expected = int(sys.argv[1])
+engine = sys.argv[2]
 if torch.cuda.device_count() != expected:
     raise SystemExit(f"Unexpected CUDA device count: {torch.cuda.device_count()} (expected {expected})")
 for index in range(expected):
     if torch.cuda.get_device_capability(index) != (9, 0) or "H100" not in torch.cuda.get_device_name(index):
         raise SystemExit(f"CUDA device {index} is not an H100")
-print(f"PyTorch {torch.__version__}, CUDA {torch.version.cuda}, FA3 import OK, {expected} H100 visible")
+if resolve_attention_engine(engine) != engine:
+    raise SystemExit(f"Requested attention engine is unavailable: {engine}")
+print(f"PyTorch {torch.__version__}, CUDA {torch.version.cuda}, {engine}, {expected} H100 visible")
 PY
 
 mkdir -p "$root/outputs"
-out=$(mktemp -d "$root/outputs/$mode.XXXXXX")
+out=$(mktemp -d "$root/outputs/$mode-${#gpu_ids[@]}gpu.XXXXXX")
 printf 'Results: %s\n' "$out"
 cd "$repo"
 
@@ -130,12 +151,18 @@ inputs=(--config "$config" --image "$root/inputs/ivan.png" --audio "$root/inputs
 if [[ $mode == smoke ]]; then
     export HF_HUB_OFFLINE=0
     "$python" -m kandinsky_s2v.cli generate "${inputs[@]}" \
-        --attention-engine flash_attention_3 --chunks 1 --steps 8 --seed 42 \
+        --attention-engine "$attention_engine" --chunks 1 --steps 8 --seed 42 \
         --out "$out/lite-1gpu.mp4" 2>&1 | tee "$out/run.log"
 else
     export HF_HUB_OFFLINE=1
-    "$UV_PROJECT_ENVIRONMENT/bin/torchrun" --standalone --nproc-per-node "${#gpu_ids[@]}" \
+    printf 'GPUs: %s | Attention: %s | Steps: %s | Repeats: %s\n' \
+        "${gpu_ids[*]}" "$attention_engine" "${steps[*]}" "$repeats" | tee "$out/run.log"
+    launcher=("$python")
+    if (( ${#gpu_ids[@]} > 1 )); then
+        launcher=("$UV_PROJECT_ENVIRONMENT/bin/torchrun" --standalone --nproc-per-node "${#gpu_ids[@]}")
+    fi
+    "${launcher[@]}" \
         "$root/benchmark_kandinsky_warm.py" "${inputs[@]}" \
-        --attention-engine flash_attention_3 --out-dir "$out" --steps 8 4 --repeats 2 \
-        2>&1 | tee "$out/run.log"
+        --attention-engine "$attention_engine" --out-dir "$out" --steps "${steps[@]}" --repeats "$repeats" \
+        2>&1 | tee -a "$out/run.log"
 fi
