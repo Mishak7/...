@@ -79,7 +79,13 @@ gpu_ids=(4)
 steps=(8 4)
 attention_engine=${ATTENTION_ENGINE:-flash_attention_3}
 repeats=${BENCHMARK_REPEATS:-2}
+video_profile=standard
 if [[ $mode == bench ]]; then
+    video_profile=${BENCHMARK_VIDEO_PROFILE:-standard}
+    case "$video_profile" in
+        standard|low-fps|low-res) ;;
+        *) fail "BENCHMARK_VIDEO_PROFILE must be standard, low-fps, or low-res." ;;
+    esac
     case "${2:-4}" in
         1) gpu_ids=(4) ;;
         2) gpu_ids=(4 5) ;;
@@ -143,9 +149,37 @@ print(f"PyTorch {torch.__version__}, CUDA {torch.version.cuda}, {engine}, {expec
 PY
 
 mkdir -p "$root/outputs"
-out=$(mktemp -d "$root/outputs/$mode-${#gpu_ids[@]}gpu.XXXXXX")
+run_name="$mode-${#gpu_ids[@]}gpu"
+if [[ $video_profile != standard ]]; then
+    run_name="$run_name-$video_profile"
+fi
+out=$(mktemp -d "$root/outputs/$run_name.XXXXXX")
 printf 'Results: %s\n' "$out"
 cd "$repo"
+
+if [[ $video_profile != standard ]]; then
+    "$python" - "$config" "$out/video-config.yaml" "$video_profile" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+from kandinsky_s2v.pipeline.config import load_config
+
+source, destination = map(Path, sys.argv[1:3])
+profile = sys.argv[3]
+config = yaml.safe_load(source.read_text(encoding="utf-8"))
+generation = config["generation"]
+if profile == "low-fps":
+    generation.update(fps=17, latent_frames=22)
+    # The oldest memory group must stay divisible by its temporal stride of four.
+    config["dit"]["frame_buckets"] = [2, 4, 16]
+else:
+    generation["allowed_resolutions"] = [[384, 384]]
+destination.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+load_config(destination)
+PY
+    config="$out/video-config.yaml"
+fi
 
 inputs=(--config "$config" --image "$root/inputs/ivan.png" --audio "$root/inputs/ref.wav")
 if [[ $mode == smoke ]]; then
@@ -155,8 +189,8 @@ if [[ $mode == smoke ]]; then
         --out "$out/lite-1gpu.mp4" 2>&1 | tee "$out/run.log"
 else
     export HF_HUB_OFFLINE=1
-    printf 'GPUs: %s | Attention: %s | Steps: %s | Repeats: %s\n' \
-        "${gpu_ids[*]}" "$attention_engine" "${steps[*]}" "$repeats" | tee "$out/run.log"
+    printf 'GPUs: %s | Attention: %s | Steps: %s | Repeats: %s | Video profile: %s\n' \
+        "${gpu_ids[*]}" "$attention_engine" "${steps[*]}" "$repeats" "$video_profile" | tee "$out/run.log"
     launcher=("$python")
     if (( ${#gpu_ids[@]} > 1 )); then
         launcher=("$UV_PROJECT_ENVIRONMENT/bin/torchrun" --standalone --nproc-per-node "${#gpu_ids[@]}")
