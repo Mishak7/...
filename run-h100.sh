@@ -9,8 +9,8 @@ fail() {
 
 mode=${1:-}
 case "$mode" in
-    install|smoke|bench) ;;
-    *) fail "Usage: bash run-h100.sh install|smoke|bench [1|2|4] [steps ...]" ;;
+    install|smoke|bench|matrix) ;;
+    *) fail "Usage: bash run-h100.sh install|smoke|bench [1|2|4] [steps ...]|matrix [1|2|4] [steps]" ;;
 esac
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -80,17 +80,23 @@ steps=(8 4)
 attention_engine=${ATTENTION_ENGINE:-flash_attention_3}
 repeats=${BENCHMARK_REPEATS:-2}
 video_profile=standard
+if [[ $mode == bench || $mode == matrix ]]; then
+    default_gpus=4
+    if [[ $mode == matrix ]]; then
+        default_gpus=2
+    fi
+    case "${2:-$default_gpus}" in
+        1) gpu_ids=(4) ;;
+        2) gpu_ids=(4 5) ;;
+        4) gpu_ids=(4 5 6 7) ;;
+        *) fail "Lite benchmark accepts 1, 2, or 4 GPUs." ;;
+    esac
+fi
 if [[ $mode == bench ]]; then
     video_profile=${BENCHMARK_VIDEO_PROFILE:-standard}
     case "$video_profile" in
         standard|low-fps|low-res) ;;
         *) fail "BENCHMARK_VIDEO_PROFILE must be standard, low-fps, or low-res." ;;
-    esac
-    case "${2:-4}" in
-        1) gpu_ids=(4) ;;
-        2) gpu_ids=(4 5) ;;
-        4) gpu_ids=(4 5 6 7) ;;
-        *) fail "Lite benchmark accepts 1, 2, or 4 GPUs." ;;
     esac
     if (( $# > 2 )); then
         steps=("${@:3}")
@@ -98,6 +104,11 @@ if [[ $mode == bench ]]; then
     for step in "${steps[@]}" "$repeats"; do
         [[ $step =~ ^[1-9][0-9]*$ ]] || fail "Steps and repeats must be positive integers."
     done
+elif [[ $mode == matrix ]]; then
+    matrix_steps=${3:-4}
+    if (( $# > 3 )) || [[ ! $matrix_steps =~ ^[1-9][0-9]*$ ]]; then
+        fail "Usage: bash run-h100.sh matrix [1|2|4] [positive step count]"
+    fi
 fi
 case "$attention_engine" in
     flash_attention_3|sdpa) ;;
@@ -126,6 +137,8 @@ fetch_verified inputs/ivan.png d0950f3677c2ff62db554c9d7d1bce5efe73bdfd3eb9f2dac
 fetch_verified inputs/ref.wav e052569e65cbaf0f97de4d8574a216eb588f39ae469ea0c989cdf7d37af1677a
 if [[ $mode == bench ]]; then
     fetch_verified benchmark_kandinsky_warm.py 6d1d1acea7ea33a2f35b3c3bea76030db8f1db15feb643d80beca79b88038456
+elif [[ $mode == matrix ]]; then
+    fetch_verified benchmark_kandinsky_matrix.py 8adadde467d3a959e8a4a17e90f7760ce98d8296bea3da74f5b1d85bba069d9a
 fi
 
 export CUDA_VISIBLE_DEVICES
@@ -189,14 +202,21 @@ if [[ $mode == smoke ]]; then
         --out "$out/lite-1gpu.mp4" 2>&1 | tee "$out/run.log"
 else
     export HF_HUB_OFFLINE=1
-    printf 'GPUs: %s | Attention: %s | Steps: %s | Repeats: %s | Video profile: %s\n' \
-        "${gpu_ids[*]}" "$attention_engine" "${steps[*]}" "$repeats" "$video_profile" | tee "$out/run.log"
     launcher=("$python")
     if (( ${#gpu_ids[@]} > 1 )); then
         launcher=("$UV_PROJECT_ENVIRONMENT/bin/torchrun" --standalone --nproc-per-node "${#gpu_ids[@]}")
     fi
-    "${launcher[@]}" \
-        "$root/benchmark_kandinsky_warm.py" "${inputs[@]}" \
-        --attention-engine "$attention_engine" --out-dir "$out" --steps "${steps[@]}" --repeats "$repeats" \
-        2>&1 | tee -a "$out/run.log"
+    if [[ $mode == matrix ]]; then
+        printf 'GPUs: %s | Attention: %s | Steps: %s\n' \
+            "${gpu_ids[*]}" "$attention_engine" "$matrix_steps" | tee "$out/run.log"
+        "${launcher[@]}" "$root/benchmark_kandinsky_matrix.py" "${inputs[@]}" \
+            --attention-engine "$attention_engine" --out-dir "$out" --steps "$matrix_steps" \
+            2>&1 | tee -a "$out/run.log"
+    else
+        printf 'GPUs: %s | Attention: %s | Steps: %s | Repeats: %s | Video profile: %s\n' \
+            "${gpu_ids[*]}" "$attention_engine" "${steps[*]}" "$repeats" "$video_profile" | tee "$out/run.log"
+        "${launcher[@]}" "$root/benchmark_kandinsky_warm.py" "${inputs[@]}" \
+            --attention-engine "$attention_engine" --out-dir "$out" --steps "${steps[@]}" --repeats "$repeats" \
+            2>&1 | tee -a "$out/run.log"
+    fi
 fi
